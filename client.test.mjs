@@ -33,8 +33,9 @@ test('included client initializes, lists and calls the local JSON HTTP server', 
   const { stdout, stderr } = await client(origin);
   assert.equal(stderr, '');
   const [tools, result] = stdout.trim().split('\n');
-  assert.equal(tools, 'Tools: text_length, ask_model');
-  assert.deepEqual(JSON.parse(result).content, [{ type: 'text', text: '5' }]);
+  assert.equal(tools, 'Tools: search_products, get_product, check_stock, get_order_status, ask_model');
+  const found = JSON.parse(JSON.parse(result).content[0].text);
+  assert(found.count > 0 && found.products.every((p) => p.priceSek <= 9000));
 });
 
 test('included client rejects incorrect and missing credentials', async (t) => {
@@ -58,7 +59,7 @@ for (const env of [{}, { APP_API_TOKEN: 'synthetic-short-token' }]) {
     const home = await fetch(origin);
     assert.equal(home.status, 200);
     assert.equal(home.headers.get('content-type'), 'text/html; charset=utf-8');
-    assert.match(await home.text(), /Expected result, not a live request/);
+    assert.match(await home.text(), /Northlight Cameras/);
     await assert.rejects(client(origin), { code: 1, stderr: /HTTP 503/ });
   });
 }

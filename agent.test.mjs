@@ -1,52 +1,9 @@
+// /agent and the shared model client (adapted from Microsoft's AI assistant sample tests).
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { once } from 'node:events';
 import { createApp } from './server.mjs';
 import { request as httpRequest } from 'node:http';
-import { readFileSync } from 'node:fs';
-import { runInNewContext } from 'node:vm';
-
-test('README documentation links use the canonical docs host', () => {
-  const readme = readFileSync(new URL('./docs/assistant/README.md', import.meta.url), 'utf8');
-  assert.match(readme, /https:\/\/builder\.appservice\.azure\.com\/docs\//);
-  assert.doesNotMatch(readme, /https:\/\/builderapps\.azure\.com\/docs(?:\/|\b)/);
-});
-
-test('public liveness control checks only health and recovers after errors', async () => {
-  const html = readFileSync(new URL('./assistant.html', import.meta.url), 'utf8');
-  const script = html.match(/<script>\s*const button[\s\S]*?<\/script>/)[0]
-    .replace(/<\/?script>/g, '');
-  let click;
-  let response;
-  const button = { disabled: false, addEventListener: (_, listener) => { click = listener; } };
-  const status = { textContent: '' };
-  runInNewContext(script, {
-    document: { querySelector: selector => selector === '[data-health-check]' ? button : status },
-    AbortSignal,
-    fetch: async (path, options) => {
-      assert.equal(path, '/health');
-      assert.equal(options.cache, 'no-store');
-      assert.equal(button.disabled, true);
-      assert.equal(status.textContent, 'Checking server liveness...');
-      if (response instanceof Error) throw response;
-      return response;
-    },
-  });
-  for (const failed of [
-    new Response('Unavailable', { status: 503 }),
-    new Response('Not a health response'),
-    new Error('Connection failed'),
-  ]) {
-    response = failed;
-    await click();
-    assert.match(status.textContent, /^Health check failed:.*Retry the check\.$/);
-    assert.equal(button.disabled, false);
-    response = new Response('OK\n');
-    await click();
-    assert.match(status.textContent, /^Healthy:.*Does not verify authentication, model configuration or AI responses\.$/);
-    assert.equal(button.disabled, false);
-  }
-});
 
 const env = {
   APP_API_TOKEN: 'local-test-token-'.repeat(3), OPENAI_API_KEY: 'provider-test-secret',
@@ -79,45 +36,6 @@ const post = (message = 'Explain HTTP') => ({
   method: 'POST',
   headers: { Authorization: `Bearer ${env.APP_API_TOKEN}`, 'Content-Type': 'application/json' },
   body: JSON.stringify({ message }),
-});
-
-test('root serves the actual public HTML without provider calls and preserves API boundaries', async (t) => {
-  const request = await fixture(t, { env: {}, fetchImpl: () => { throw new Error('must not call'); } });
-  for (const path of ['/assistant', '/assistant?scoutTheme=light', '/assistant?scoutTheme=dark&check=1']) {
-    const response = await request(path);
-    assert.equal(response.status, 200);
-    assert.equal(response.headers.get('content-type'), 'text/html; charset=utf-8');
-    assert.match(response.headers.get('content-security-policy'), /form-action 'none'/);
-    assert.equal(response.headers.get('cache-control'), 'no-store');
-    assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
-    assert.equal(response.headers.get('referrer-policy'), 'no-referrer');
-    assert.equal(response.headers.get('location'), null);
-    const html = await response.text();
-    assert.equal(html, readFileSync(new URL('./assistant.html', import.meta.url), 'utf8'));
-    assert.match(html, /<html lang="en">/);
-    assert.match(html, /not a live chat/);
-    assert.match(html, /No generated reply is shown/);
-    assert(!html.includes('<form'));
-    assert.match(html, /fetch\('\/health',/);
-    assert.match(html, /data-health-path="\/health"/);
-    assert.match(html, /id="health-status" role="status"/);
-    assert.doesNotMatch(html, /fetch\(['"]\/agent/);
-    assert.match(response.headers.get('content-security-policy'), /connect-src 'self'/);
-    assert(!html.includes(env.OPENAI_API_KEY));
-    assert(!html.includes(env.APP_API_TOKEN));
-    assert.doesNotMatch(html, /\/demo|sample identifier|<script[^>]+src=/);
-  }
-  assert.equal(await (await request('/health')).text(), 'OK\n');
-  assert.equal((await request('/agent', { method: 'POST' })).status, 503);
-  for (const path of ['/demo', '/demo/', '/demo/index.php', '/demo?scoutTheme=light',
-    '/demo/missing', '/demo.html', '/index.html', '/missing', '/health?check=1', '/agent?check=1']) {
-    assert.equal((await request(path)).status, 404, path);
-  }
-  for (const method of ['POST', 'HEAD', 'DELETE']) {
-    assert.equal((await request('/', { method })).status, 404, method);
-    assert.equal((await request('/demo', { method })).status, 404, method);
-  }
-  assert.equal((await request('/', { headers: { Origin: 'https://evil.example' } })).status, 403);
 });
 
 test('one authenticated turn calls the real API contract with bounded, tool-free output', async (t) => {
@@ -213,7 +131,7 @@ test('Azure configuration fails closed and rejects untrusted endpoints and leake
     assert.equal((await request('/health')).status, 200);
     assert.equal((await request('/agent', post())).status, 503);
     assert.equal((await request('/ready')).status, 503);
-    assert.equal((await (await request('/api/setup')).json()).code, 'model_configuration_invalid');
+    assert.equal((await (await request('/ready')).json()).code, 'model_configuration_invalid');
   }
   const request = await fixture(t, { env: azureEnv, fetchImpl: async () => completed(azureEnv.AZURE_OPENAI_API_KEY) });
   const response = await request('/agent', post());
@@ -261,7 +179,7 @@ test('managed identity failure, stale keys and token leakage fail closed without
     async getToken() { throw new Error('private identity details'); },
   }, fetchImpl: () => { throw new Error('must not call'); } });
   assert.deepEqual(await (await failed('/agent', post())).json(), { error: 'model_response_failed' });
-  assert.equal((await (await failed('/api/setup')).json()).code, 'model_access_denied');
+  assert.equal((await (await failed('/ready')).json()).code, 'model_access_denied');
   const stale = await fixture(t, { env: { ...azureEnv, AZURE_OPENAI_API_KEY: 'old-key' },
     fetchImpl: () => { throw new Error('must not call'); } });
   assert.equal((await stale('/agent', post())).status, 503);
@@ -277,10 +195,7 @@ test('setup separates liveness/configuration from actual model success and sanit
   const request = await fixture(t, { fetchImpl: async () => { calls++; return provider; } });
   assert.equal((await request('/health')).status, 200);
   assert.equal((await request('/ready')).status, 503);
-  assert.equal((await (await request('/api/setup')).json()).code, 'not_checked');
-  const document = await (await request('/README.md')).text();
-  assert.match(document, /id="setup"/);
-  assert.match(document, /already deployed/);
+  assert.equal((await (await request('/ready')).json()).code, 'not_checked');
   assert.equal(calls, 0);
   assert.equal((await request('/agent', post())).status, 200);
   assert.equal((await request('/ready')).status, 200);
@@ -292,8 +207,7 @@ test('setup separates liveness/configuration from actual model success and sanit
     assert.equal(readiness.status, 503);
     const state = await readiness.json();
     assert.equal(state.code, code);
-    assert.equal(state.setupUrl, './README.md#setup');
-    assert.doesNotMatch(JSON.stringify(state), /private-canary|provider-test-secret|owner-selected-model/);
+    assert.doesNotMatch(JSON.stringify(state), /private-canary|provider-test-secret/);
   }
   assert.equal(calls, 6, 'Setup/readiness reads never call the provider');
 });

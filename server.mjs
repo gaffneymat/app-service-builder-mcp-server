@@ -2,16 +2,16 @@ import { createServer } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { readFileSync } from 'node:fs';
-import { McpServer } from '@modelcontextprotocol/server';
 import { NodeStreamableHTTPServerTransport } from '@modelcontextprotocol/node';
-import * as z from 'zod';
-import { setupPage } from './setup-page.mjs';
 import { createModel, readBounded, ModelError, MAX_MESSAGE } from './model.mjs';
+import { createMcpServer } from './tools.mjs';
+import { createDemo } from './demo.mjs';
 
 const MAX_BODY = 8192;
-const home = readFileSync(new URL('./index.html', import.meta.url), 'utf8');
-const assistantHome = readFileSync(new URL('./assistant.html', import.meta.url));
-const readme = setupPage();
+const MAX_DEMO_BODY = 16_384;
+const home = readFileSync(new URL('./index.html', import.meta.url));
+const PAGE_CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; "
+  + "connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 const matches = (actual, expected) => {
   const left = Buffer.from(actual ?? '');
@@ -20,14 +20,14 @@ const matches = (actual, expected) => {
 };
 
 /**
- * One Builder web component serving both templates:
- *   POST /mcp   - stateless MCP endpoint (text_length, ask_model)
- *   POST /agent - single-turn AI assistant API
- * Both share APP_API_TOKEN and one bounded model client. Each MCP POST owns a fresh
- * SDK server/transport, closed when its response finishes; there is no session
- * persistence and no GET event stream.
+ * One Builder web component:
+ *   GET  /               - the Northlight Cameras demo page (AI + MCP, invented data)
+ *   POST /api/demo/chat  - the demo agent; trusts Builder's visitor sign-in, same-origin only, rate limited
+ *   POST /mcp            - stateless MCP endpoint (shop tools + ask_model), needs APP_API_TOKEN
+ *   POST /agent          - single-turn AI API, needs APP_API_TOKEN
+ *   GET  /health, /ready - liveness and model readiness
  */
-export function createApp({ env = process.env, fetchImpl = fetch, timeoutMs = 10_000, credential } = {}) {
+export function createApp({ env = process.env, fetchImpl = fetch, timeoutMs = 10_000, credential, demoLimits } = {}) {
   const token = env.APP_API_TOKEN ?? '';
   const model = createModel({ env, fetchImpl, timeoutMs, credential });
   const origin = env.PUBLIC_ORIGIN ? new URL(env.PUBLIC_ORIGIN) : null;
@@ -35,19 +35,14 @@ export function createApp({ env = process.env, fetchImpl = fetch, timeoutMs = 10
     throw new Error('PUBLIC_ORIGIN must be an exact HTTPS origin');
   }
   const origins = ['http://localhost:8080', 'http://127.0.0.1:8080', ...(origin ? [origin.origin] : [])];
+  const demo = createDemo({
+    model, token,
+    perMinute: demoLimits?.perMinute ?? Number(env.DEMO_PER_MINUTE ?? 12),
+    perDay: demoLimits?.perDay ?? Number(env.DEMO_PER_DAY ?? 300),
+  });
   const send = (res, status, body) => {
     res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
     res.end(JSON.stringify(body));
-  };
-  const html = (res, body, csp) => {
-    res.writeHead(200, {
-      'Content-Type': 'text/html; charset=utf-8',
-      'Cache-Control': 'no-store',
-      'X-Content-Type-Options': 'nosniff',
-      'Referrer-Policy': 'no-referrer',
-      ...(csp ? { 'Content-Security-Policy': csp } : {}),
-    });
-    res.end(body);
   };
 
   async function agent(req, res) {
@@ -95,29 +90,7 @@ export function createApp({ env = process.env, fetchImpl = fetch, timeoutMs = 10
     } catch (error) {
       return error.message === 'body_limit' ? send(res, 413, { error: 'body_limit' }) : send(res, 400, { error: 'invalid_json' });
     }
-    const server = new McpServer({ name: 'builder-mcp-ai-sample', version: '1.1.0' });
-    server.registerTool('text_length', {
-      description: 'Count Unicode code points in at most 1000 UTF-16 code units of text; performs no I/O.',
-      inputSchema: z.object({ text: z.string().max(1000) }).strict(),
-      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-    }, async ({ text }) => ({
-      content: [{ type: 'text', text: String(Array.from(text).length) }],
-    }));
-    server.registerTool('ask_model', {
-      description: 'Send one plain-text question (1-2000 characters) to the app\'s configured model and return its '
-        + 'single-turn reply. No tools, no memory, nothing stored; the only I/O is the model call.',
-      inputSchema: z.object({
-        message: z.string().max(MAX_MESSAGE).refine((value) => value.trim().length > 0, 'message must not be blank'),
-      }).strict(),
-      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true },
-    }, async ({ message }, extra) => {
-      try {
-        return { content: [{ type: 'text', text: await model.ask(message, extra?.signal) }] };
-      } catch (error) {
-        const code = error instanceof ModelError ? error.code : 'model_response_failed';
-        return { isError: true, content: [{ type: 'text', text: code }] };
-      }
-    });
+    const server = createMcpServer({ model });
     const transport = new NodeStreamableHTTPServerTransport({
       sessionIdGenerator: undefined, enableJsonResponse: true,
       enableDnsRebindingProtection: true, allowedOrigins: origins,
@@ -133,31 +106,50 @@ export function createApp({ env = process.env, fetchImpl = fetch, timeoutMs = 10
     }
   }
 
+  async function demoChat(req, res) {
+    if (req.method !== 'POST') return send(res, 405, { error: 'method_not_allowed' });
+    // Browser-only route: Builder's Entra sign-in admits the visitor; the app additionally
+    // requires a same-origin browser request so other sites and scripts cannot drive it.
+    if (req.headers.origin === undefined || !origins.includes(req.headers.origin)
+      || (req.headers['sec-fetch-site'] !== undefined && req.headers['sec-fetch-site'] !== 'same-origin')) {
+      return send(res, 403, { error: 'same_origin_browser_requests_only' });
+    }
+    if (req.headers['content-type']?.split(';')[0] !== 'application/json') {
+      return send(res, 415, { error: 'expected_json' });
+    }
+    let body;
+    try {
+      body = await readBounded(req, MAX_DEMO_BODY);
+    } catch {
+      return send(res, 413, { error: 'body_limit' });
+    }
+    const refused = await demo(req, res, body);
+    if (refused) send(res, refused.status, { error: refused.error });
+  }
+
   const app = createServer(async (req, res) => {
     if (req.headers.origin !== undefined && !origins.includes(req.headers.origin)) {
       return send(res, 403, { error: 'untrusted_origin' });
     }
     const path = req.url?.split('?')[0];
-    if (req.method === 'GET' && req.url === '/health') {
+    if (req.method === 'GET' && path === '/health') {
       res.writeHead(200, { 'Content-Type': 'text/plain' });
       return res.end('OK\n');
     }
-    if (req.method === 'GET' && path === '/') return html(res, home);
-    if (req.method === 'GET' && path === '/assistant') {
-      return html(res, assistantHome, "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
-        + "connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'");
+    if (req.method === 'GET' && path === '/') {
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
+        'Referrer-Policy': 'no-referrer', 'Content-Security-Policy': PAGE_CSP,
+      });
+      return res.end(home);
     }
-    if (req.method === 'GET' && req.url === '/README.md') {
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store',
-        'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'" });
-      return res.end(readme);
-    }
-    if (req.method === 'GET' && (req.url === '/api/setup' || req.url === '/ready')) {
+    if (req.method === 'GET' && path === '/ready') {
       const state = model.setup();
-      return send(res, req.url === '/ready' && state.code !== 'response_verified' ? 503 : 200, state);
+      return send(res, state.code === 'response_verified' ? 200 : 503, state);
     }
-    if (req.url === '/agent') return agent(req, res);
-    if (req.url === '/mcp') return mcp(req, res);
+    if (path === '/api/demo/chat') return demoChat(req, res);
+    if (path === '/agent') return agent(req, res);
+    if (path === '/mcp') return mcp(req, res);
     return send(res, 404, { error: 'not_found' });
   });
   app.requestTimeout = 15_000;

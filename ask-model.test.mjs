@@ -94,9 +94,8 @@ test('the AI endpoint and the MCP tool share the same app token and model client
   });
   assert.equal(agent.status, 200);
   assert.deepEqual(await agent.json(), { reply: 'A short answer' });
-  const setup = await (await fetch(`${base}/api/setup`)).json();
-  assert.equal(setup.code, 'response_verified');
-  assert.equal((await fetch(`${base}/assistant`)).status, 200);
-  assert.equal((await fetch(`${base}/assistant.html`)).status, 404);
+  const ready = await fetch(`${base}/ready`);
+  assert.equal(ready.status, 200);
+  assert.equal((await ready.json()).code, 'response_verified');
   assert.equal(calls, 1);
 });

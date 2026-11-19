@@ -1,6 +1,6 @@
-// Shared single-turn model client used by both POST /agent and the ask_model MCP tool.
-// Extracted from the AI assistant sample; provider destinations stay fixed or restricted
-// to Azure OpenAI resource origins, never caller-controlled URLs.
+// Shared model client used by POST /agent, the ask_model MCP tool and the shop demo.
+// Provider destinations stay fixed or restricted to Azure OpenAI resource origins,
+// never caller-controlled URLs.
 
 export const MAX_MESSAGE = 2000;
 export const MAX_OUTPUT = 4000;
@@ -65,15 +65,17 @@ export function createModel({ env = process.env, fetchImpl = fetch, timeoutMs = 
       : invalidEndpoint || invalidAuth ? 'model_configuration_invalid'
       : !configured() ? 'model_not_configured'
       : Date.now() - checkedAt > 300_000 ? 'not_checked' : outcome;
-    return { code, setupUrl: './README.md#setup', lastCheckedAt: checkedAt || null };
+    return { code, model: configured() ? model : null, lastCheckedAt: checkedAt || null };
   };
 
+  const leaks = (text, accessToken) => (key && text.includes(key))
+    || (accessToken && text.includes(accessToken)) || (token && text.includes(token));
+
   /**
-   * One bounded, tool-free turn. Resolves to the reply text or throws ModelError.
-   * `signal` lets the caller abort (for example on client disconnect); any abort is
-   * reported as request_timeout, matching the original sample.
+   * One bounded Responses API call. `finish(result, accessToken)` validates and shapes the
+   * parsed provider result; any failure becomes a sanitized ModelError.
    */
-  async function ask(message, signal) {
+  async function call(payload, signal, finish) {
     if (!configured()) throw new ModelError('model_not_configured', 503);
     if (active >= MAX_ACTIVE) throw new ModelError('busy', 429);
     active++;
@@ -99,11 +101,7 @@ export function createModel({ env = process.env, fetchImpl = fetch, timeoutMs = 
       const response = await fetchImpl(modelUrl, {
         method: 'POST',
         headers: { ...(azure && !managedIdentity ? { 'api-key': key } : { Authorization: `Bearer ${managedIdentity ? accessToken : key}` }), 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model, input: message,
-          instructions: 'You are a concise development assistant. Answer in plain text. Do not request secrets.',
-          max_output_tokens: 512, store: false, stream: false, tools: [],
-        }),
+        body: JSON.stringify({ model, ...payload, store: false, stream: false }),
         signal: controller.signal, redirect: 'error',
       });
       if (!response.ok) {
@@ -116,17 +114,10 @@ export function createModel({ env = process.env, fetchImpl = fetch, timeoutMs = 
       const { Readable } = await import('node:stream');
       const result = JSON.parse(await readBounded(Readable.fromWeb(response.body), 65_536));
       if (result.status !== 'completed' || !Array.isArray(result.output)) throw new Error('incomplete');
-      const parts = result.output.filter((item) => item.type === 'message' && item.role === 'assistant')
-        .flatMap((item) => item.content ?? []).filter((item) => item.type === 'output_text');
-      if (parts.some((item) => typeof item.text !== 'string')) throw new Error('invalid_output');
-      const text = parts.map((item) => item.text).join('\n');
-      if (!text.trim() || text.length > MAX_OUTPUT || (key && text.includes(key)) ||
-        (accessToken && text.includes(accessToken)) || (token && text.includes(token))) {
-        throw new Error('invalid_output');
-      }
+      const shaped = finish(result, accessToken);
       outcome = 'response_verified';
       checkedAt = Date.now();
-      return text;
+      return shaped;
     } catch {
       const timedOut = controller.signal.aborted;
       outcome = timedOut ? 'request_timeout' : failure;
@@ -139,5 +130,43 @@ export function createModel({ env = process.env, fetchImpl = fetch, timeoutMs = 
     }
   }
 
-  return { ask, setup, configured, get active() { return active; } };
+  const textOf = (result) => {
+    const parts = result.output.filter((item) => item.type === 'message' && item.role === 'assistant')
+      .flatMap((item) => item.content ?? []).filter((item) => item.type === 'output_text');
+    if (parts.some((item) => typeof item.text !== 'string')) throw new Error('invalid_output');
+    return parts.map((item) => item.text).join('\n');
+  };
+
+  /** One bounded, tool-free turn. Resolves to the reply text or throws ModelError. */
+  const ask = (message, signal) => call({
+    input: message,
+    instructions: 'You are a concise development assistant. Answer in plain text. Do not request secrets.',
+    max_output_tokens: 512, tools: [],
+  }, signal, (result, accessToken) => {
+    const text = textOf(result);
+    if (!text.trim() || text.length > MAX_OUTPUT || leaks(text, accessToken)) throw new Error('invalid_output');
+    return text;
+  });
+
+  /**
+   * One turn of a tool-calling conversation. Returns the function calls the model asked
+   * for (if any), its text (if any), the raw output items to replay, and token usage.
+   */
+  const respond = ({ instructions, input, tools, maxOutputTokens = 700 }, signal) => call({
+    instructions, input, tools, tool_choice: 'auto', parallel_tool_calls: true, max_output_tokens: maxOutputTokens,
+  }, signal, (result, accessToken) => {
+    const calls = result.output.filter((item) => item.type === 'function_call')
+      .map((item) => ({ type: 'function_call', call_id: item.call_id, name: item.name, arguments: item.arguments }));
+    if (calls.some((c) => typeof c.call_id !== 'string' || typeof c.name !== 'string' || typeof c.arguments !== 'string')) {
+      throw new Error('invalid_output');
+    }
+    const text = textOf(result);
+    if ((!calls.length && !text.trim()) || text.length > MAX_OUTPUT || leaks(text, accessToken)) throw new Error('invalid_output');
+    return {
+      calls, text,
+      usage: { input: result.usage?.input_tokens ?? 0, output: result.usage?.output_tokens ?? 0 },
+    };
+  });
+
+  return { ask, respond, setup, configured, get active() { return active; } };
 }

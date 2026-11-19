@@ -30,37 +30,28 @@ const headers = {
   Accept: 'application/json, text/event-stream', 'MCP-Protocol-Version': '2025-11-25',
 };
 
-test('public root serves the actual informational HTML and preserves protocol boundaries', async (t) => {
+test('root serves the demo page with a strict CSP and no Microsoft boilerplate routes', async (t) => {
   const request = await fixture(t, {});
-  for (const path of ['/', '/?scoutTheme=dark', '/?scoutTheme=light&check=1']) {
+  for (const path of ['/', '/?check=1']) {
     const response = await request(path);
     assert.equal(response.status, 200);
     assert.match(response.headers.get('content-type'), /text\/html; charset=utf-8/);
     assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
     assert.equal(response.headers.get('referrer-policy'), 'no-referrer');
-    assert.equal(response.headers.get('location'), null);
+    assert.match(response.headers.get('content-security-policy'), /default-src 'none'.*connect-src 'self'/);
     const html = await response.text();
     assert.equal(html, readFileSync(new URL('./index.html', import.meta.url), 'utf8'));
-    assert.match(html, /<html lang="en">/);
-    assert.match(html, /text_length/);
-    assert.match(html, /Expected result, not a live request/);
-    assert.match(html, /node client\.mjs/);
-    assert.match(html, /data-health-path="\/health"/);
-    assert.match(html, /id="health-status" role="status"/);
-    assert.doesNotMatch(html, /\/demo|plain-text greeting|sample identifier/);
-    assert.doesNotMatch(html, /<script[^>]+src=|XMLHttpRequest/);
-    assert.deepEqual([...html.matchAll(/fetch\('([^']+)'/g)].map(match => match[1]), ['/health']);
+    assert.match(html, /Northlight Cameras/);
+    assert.match(html, /Fictional demo shop/);
+    assert.doesNotMatch(html, /<script[^>]+src=|<link[^>]+stylesheet|https?:\/\/(?!www\.w3\.org)/);
+    assert.deepEqual([...html.matchAll(/fetch\('([^']+)'/g)].map((m) => m[1]), ['/ready', '/api/demo/chat']);
   }
   assert.equal(await (await request('/health')).text(), 'OK\n');
   assert.equal((await request('/mcp', { method: 'POST' })).status, 503);
-  for (const path of ['/demo', '/demo/', '/demo/index.php', '/demo?scoutTheme=dark',
-    '/demo/missing', '/demo.html', '/index.html', '/missing', '/health?check=1', '/mcp?check=1']) {
+  for (const path of ['/assistant', '/README.md', '/api/setup', '/index.html', '/demo', '/missing']) {
     assert.equal((await request(path)).status, 404, path);
   }
-  for (const method of ['POST', 'HEAD', 'DELETE']) {
-    assert.equal((await request('/', { method })).status, 404, method);
-    assert.equal((await request('/demo', { method })).status, 404, method);
-  }
+  for (const method of ['POST', 'DELETE']) assert.equal((await request('/', { method })).status, 404, method);
   assert.equal((await request('/', { headers: { Origin: 'https://evil.example' } })).status, 403);
 });
 
@@ -78,12 +69,14 @@ test('HTTP initialize, initialized, list and bounded read-only call work without
   assert.equal((await initialized.json()).result.protocolVersion, '2025-11-25');
   assert.equal((await rpc(null, 'notifications/initialized')).status, 202);
   const listed = (await (await rpc(2, 'tools/list', {})).json()).result.tools;
-  assert.deepEqual(listed.map((tool) => tool.name), ['text_length', 'ask_model']);
-  assert.equal(listed[0].annotations.readOnlyHint, true);
-  const called = await (await rpc(3, 'tools/call', { name: 'text_length', arguments: { text: 'Hi😀' } })).json();
-  assert.deepEqual(called.result.content, [{ type: 'text', text: '3' }]);
+  assert.deepEqual(listed.map((tool) => tool.name), ['search_products', 'get_product', 'check_stock', 'get_order_status', 'ask_model']);
+  for (const tool of listed.slice(0, 4)) assert.equal(tool.annotations.readOnlyHint, true, tool.name);
+  const called = await (await rpc(3, 'tools/call', { name: 'check_stock', arguments: { productId: 'LUM-Z5', store: 'Malmö' } })).json();
+  assert.deepEqual(JSON.parse(called.result.content[0].text).stock, [{ store: 'Malmö', units: 0 }]);
+  const order = await (await rpc(5, 'tools/call', { name: 'get_order_status', arguments: { orderNumber: 'nl-10511' } })).json();
+  assert.equal(JSON.parse(order.result.content[0].text).status, 'Waiting for stock');
   const invalid = await (await rpc(4, 'tools/call', {
-    name: 'text_length', arguments: { text: 'x'.repeat(1001) },
+    name: 'search_products', arguments: { query: 'x'.repeat(201) },
   })).json();
   assert(invalid.error || invalid.result?.isError);
   assert.equal((await request('/mcp')).status, 405);
@@ -124,8 +117,8 @@ test('ordinary hosted HTTP works without public-host forwarding while auth and O
   assert.equal((await rpc(1, 'initialize', {
     protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'proxy-test', version: '1' },
   })).status, 200);
-  const called = await (await rpc(2, 'tools/call', { name: 'text_length', arguments: { text: 'Hi😀' } })).json();
-  assert.deepEqual(called.result.content, [{ type: 'text', text: '3' }]);
+  const called = await (await rpc(2, 'tools/call', { name: 'get_product', arguments: { productId: 'LUM-Z5' } })).json();
+  assert.equal(JSON.parse(called.result.content[0].text).name, 'Lumora Z5');
   assert.equal((await request('/mcp', { method: 'POST', headers: { ...hosted, Authorization: 'Bearer wrong' } })).status, 401);
   for (const forwardedHost of ['evil.example', 'sample.example, evil.example', '']) {
     assert.equal((await request('/mcp', { method: 'POST',

@@ -32,4 +32,4 @@ protocol = initialized.protocolVersion;
 await rpc(undefined, 'notifications/initialized');
 const tools = await rpc(2, 'tools/list', {});
 console.log('Tools:', tools.tools.map((tool) => tool.name).join(', '));
-console.log(JSON.stringify(await rpc(3, 'tools/call', { name: 'text_length', arguments: { text: 'Hello' } })));
+console.log(JSON.stringify(await rpc(3, 'tools/call', { name: 'search_products', arguments: { query: 'travel', maxPriceSek: 9000 } })));
