@@ -52,7 +52,11 @@ export const ORDERS = {
   'NL-10390': { status: 'Refunded', placed: '2026-11-02', items: ['AUR-V1'], detail: 'Return received on 12 Nov, 6,990 SEK refunded to the original card on 13 Nov.' },
 };
 
-const summary = (p) => ({ id: p.id, name: p.name, category: p.category, priceSek: p.priceSek, mount: p.mount, inStockTotal: Object.values(p.stock).reduce((a, b) => a + b, 0) });
+const summary = (p) => ({
+  id: p.id, name: p.name, category: p.category, priceSek: p.priceSek, mount: p.mount,
+  ...(p.category === 'camera' && !p.mount ? { fixedLens: true, lensNote: 'Built-in lens; no other lens fits this camera' } : {}),
+  inStockTotal: Object.values(p.stock).reduce((a, b) => a + b, 0),
+});
 const normal = (s) => String(s ?? '').toLowerCase().normalize('NFKD').replace(/\p{M}/gu, '');
 
 // Category words (English and Swedish) so "lenses" or "objektiv" find every lens, not only

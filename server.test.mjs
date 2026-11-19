@@ -78,6 +78,10 @@ test('HTTP initialize, initialized, list and bounded read-only call work without
     ['LUM-100400', 'LUM-2470', 'LUM-50', 'VAN-28200-ZX'], 'a category word finds every lens for the mount');
   const fits = await (await rpc(7, 'tools/call', { name: 'get_product', arguments: { productId: 'LUM-Z5' } })).json();
   assert.equal(JSON.parse(fits.result.content[0].text).compatibleLensesAndAccessories.filter((p) => p.category === 'lens').length, 4);
+  const compact = await (await rpc(8, 'tools/call', { name: 'get_product', arguments: { productId: 'LUM-C2' } })).json();
+  const c2 = JSON.parse(compact.result.content[0].text);
+  assert.equal(c2.fixedLens, true, 'a compact says outright that no lens fits it');
+  assert.deepEqual(c2.compatibleLensesAndAccessories, []);
   const order = await (await rpc(5, 'tools/call', { name: 'get_order_status', arguments: { orderNumber: 'nl-10511' } })).json();
   assert.equal(JSON.parse(order.result.content[0].text).status, 'Waiting for stock');
   const invalid = await (await rpc(4, 'tools/call', {
