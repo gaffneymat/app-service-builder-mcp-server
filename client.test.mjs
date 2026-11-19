@@ -33,7 +33,7 @@ test('included client initializes, lists and calls the local JSON HTTP server', 
   const { stdout, stderr } = await client(origin);
   assert.equal(stderr, '');
   const [tools, result] = stdout.trim().split('\n');
-  assert.equal(tools, 'Tools: text_length');
+  assert.equal(tools, 'Tools: text_length, ask_model');
   assert.deepEqual(JSON.parse(result).content, [{ type: 'text', text: '5' }]);
 });
 

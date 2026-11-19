@@ -23,6 +23,39 @@ App Service Builder preview environment before deploying. Local tests do not
 qualify a deployed route, another MCP client, or production use. This is an
 HTTP MCP endpoint, not a remote stdio bridge or native Builder agent orchestration.
 
+## Combined MCP server and AI assistant
+
+This fork merges two Builder templates into one web component (Builder allows
+at most one HTTP component per app), so both run in the same Node process:
+
+| Route | From template | Purpose |
+|-------|---------------|---------|
+| `GET /` | MCP server | MCP showcase page (links to `/assistant`) |
+| `GET /assistant` | AI assistant | AI assistant showcase page |
+| `GET /README.md`, `GET /api/setup`, `GET /ready` | AI assistant | Setup guide and model readiness |
+| `POST /mcp` | MCP server | Stateless MCP endpoint with `text_length` and `ask_model` |
+| `POST /agent` | AI assistant | Single-turn assistant: `{"message": "..."}` returns `{"reply": "..."}` |
+| `GET /health` | both | Public liveness |
+
+`ask_model` is the bridge: MCP clients reach the same bounded model client that
+`/agent` uses (`model.mjs`: 512 output tokens, 10-second deadline, 4 concurrent
+calls shared across both routes, sanitized error codes only). Both routes use the
+same `APP_API_TOKEN`.
+
+Model variables (managed identity is the default for Azure OpenAI; no key is stored):
+
+| Variable | Value |
+|----------|-------|
+| `MODEL_SERVICE` | `azure-openai` |
+| `AZURE_OPENAI_ENDPOINT` | `https://<account>.openai.azure.com/openai/v1/` |
+| `AZURE_OPENAI_DEPLOYMENT` | Responses-compatible deployment name |
+| `APP_API_TOKEN` | Random secret, at least 32 characters |
+
+The app's system-assigned identity needs **Cognitive Services OpenAI User** on the
+model account. `infra/model.bicep` and `connection.json` come from the
+[AI assistant sample](https://github.com/AzureAppService/app-service-builder-ai-agent);
+its full setup guide is in `docs/assistant/README.md`.
+
 ## Showcase preview
 
 The read-only showcase is the home page at `/`, served directly as HTML.

@@ -78,7 +78,7 @@ test('HTTP initialize, initialized, list and bounded read-only call work without
   assert.equal((await initialized.json()).result.protocolVersion, '2025-11-25');
   assert.equal((await rpc(null, 'notifications/initialized')).status, 202);
   const listed = (await (await rpc(2, 'tools/list', {})).json()).result.tools;
-  assert.deepEqual(listed.map((tool) => tool.name), ['text_length']);
+  assert.deepEqual(listed.map((tool) => tool.name), ['text_length', 'ask_model']);
   assert.equal(listed[0].annotations.readOnlyHint, true);
   const called = await (await rpc(3, 'tools/call', { name: 'text_length', arguments: { text: 'Hi😀' } })).json();
   assert.deepEqual(called.result.content, [{ type: 'text', text: '3' }]);
