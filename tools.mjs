@@ -28,7 +28,8 @@ export function createMcpServer({ model }) {
   }, async (args) => json(searchProducts(args)));
 
   server.registerTool('get_product', {
-    description: 'Full details for one product id, including specs and, for cameras, the lenses and accessories that fit it.',
+    description: 'Full details for one product id, including specs and, for a camera, EVERY lens and accessory in the '
+      + 'catalogue that fits it. Use this when asked what fits or works with a camera.',
     inputSchema: z.object({ productId: z.string().max(40) }).strict(),
     annotations: readOnly,
   }, async (args) => json(getProduct(args)));

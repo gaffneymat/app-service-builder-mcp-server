@@ -55,13 +55,21 @@ export const ORDERS = {
 const summary = (p) => ({ id: p.id, name: p.name, category: p.category, priceSek: p.priceSek, mount: p.mount, inStockTotal: Object.values(p.stock).reduce((a, b) => a + b, 0) });
 const normal = (s) => String(s ?? '').toLowerCase().normalize('NFKD').replace(/\p{M}/gu, '');
 
+// Category words (English and Swedish) so "lenses" or "objektiv" find every lens, not only
+// lenses whose description happens to contain the word.
+const CATEGORY_WORDS = {
+  camera: 'camera cameras kamera kameror',
+  lens: 'lens lenses objektiv',
+  accessory: 'accessory accessories tillbehor',
+};
+
 export function searchProducts({ query, category, maxPriceSek, mount } = {}) {
   const words = normal(query).split(/[^a-z0-9]+/).filter((w) => w.length > 1);
   const hits = PRODUCTS.filter((p) => (!category || p.category === category)
     && (maxPriceSek === undefined || p.priceSek <= maxPriceSek)
     && (!mount || normal(p.mount) === normal(mount)))
     .map((p) => {
-      const hay = normal(`${p.name} ${p.brand} ${p.specs} ${p.tags.join(' ')} ${p.mount ?? ''}`);
+      const hay = normal(`${p.name} ${p.brand} ${p.specs} ${p.tags.join(' ')} ${p.mount ?? ''} ${CATEGORY_WORDS[p.category]}`);
       return { p, score: words.length ? words.filter((w) => hay.includes(w)).length : 1 };
     })
     .filter((h) => h.score > 0)

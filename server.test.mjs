@@ -73,6 +73,11 @@ test('HTTP initialize, initialized, list and bounded read-only call work without
   for (const tool of listed.slice(0, 4)) assert.equal(tool.annotations.readOnlyHint, true, tool.name);
   const called = await (await rpc(3, 'tools/call', { name: 'check_stock', arguments: { productId: 'LUM-Z5', store: 'Malmö' } })).json();
   assert.deepEqual(JSON.parse(called.result.content[0].text).stock, [{ store: 'Malmö', units: 0 }]);
+  const lenses = await (await rpc(6, 'tools/call', { name: 'search_products', arguments: { query: 'lenses', mount: 'Lumora ZX' } })).json();
+  assert.deepEqual(JSON.parse(lenses.result.content[0].text).products.map((p) => p.id).sort(),
+    ['LUM-100400', 'LUM-2470', 'LUM-50', 'VAN-28200-ZX'], 'a category word finds every lens for the mount');
+  const fits = await (await rpc(7, 'tools/call', { name: 'get_product', arguments: { productId: 'LUM-Z5' } })).json();
+  assert.equal(JSON.parse(fits.result.content[0].text).compatibleLensesAndAccessories.filter((p) => p.category === 'lens').length, 4);
   const order = await (await rpc(5, 'tools/call', { name: 'get_order_status', arguments: { orderNumber: 'nl-10511' } })).json();
   assert.equal(JSON.parse(order.result.content[0].text).status, 'Waiting for stock');
   const invalid = await (await rpc(4, 'tools/call', {
